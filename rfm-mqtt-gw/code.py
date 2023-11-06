@@ -14,28 +14,77 @@ import socketpool
 import ssl
 import adafruit_minimqtt.adafruit_minimqtt as MQTT
 import json
+import time
 
 print(f"Connecting to {os.getenv('CIRCUITPY_WIFI_SSID')}")
 wifi.radio.connect(
     os.getenv("CIRCUITPY_WIFI_SSID"), os.getenv("CIRCUITPY_WIFI_PASSWORD")
 )
-wifi.radio.hostname = "RfGw"
 
 print(f"Connected to {os.getenv('CIRCUITPY_WIFI_SSID')}!")
 print(f"My IP address: {wifi.radio.ipv4_address}")
 
+# load saved nodes from nodes.txt
+
+class NodeMsg():
+    def __init__(self, msg, client, rfm):
+        self.id = str(msg, "ascii").split(';')[0]  # node id
+        self.name = str(msg, "ascii").split(';')[1]  # 0 - presentation, 1 - state
+        self.type = str(msg, "ascii").split(';')[2]  # payload
+        self.device = str(msg, "ascii").split(';')[3]
+        self.payload = str(msg, "ascii").split(';')[4]
+        self.client = client
+        self.topic_base = "homeassistant/"+self.device+"/"+self.name
+        self.topic_state = self.topic_base+"/state"
+        self.topic_cmd = self.topic_base+"/set"
+        self.rfm = rfm
+        self.msg = msg
+        self.handle = self.gen_handler()
+
+    def process(self):
+        if self.type == "0":
+            # create a presentation dict
+            jmsg = {
+                    'name': self.name,
+                    'device_class': self.device,
+                    'state_topic': self.topic_state,
+                    'command_topic': self.topic_cmd,
+                    'unique_id': self.id,
+                    'payload_on': "ON",
+                    'device': {'identifiers': [self.id], 'name': self.id}
+                    }
+            # return topic_base+"/config", json.dumps(jmsg)
+            self.client.publish(self.topic_base+"/config", json.dumps(jmsg))
+            print(self.topic_cmd)
+            self.client.subscribe(self.topic_cmd)
+            self.client.on_message = self.handle
+        elif self.type == "1":
+            jmsg = self.payload
+            self.client.publish(self.topic_state, jmsg)
+            # self.client.publish(topic_base, jmsg)
+        # elif self.type == "2":
+        #     print("got ping from: ", self.id)
+        #     self.rfm.send(bytes("pong", "ascii"), destination=int(self.id))
+
+    def gen_handler(self):
+        def handle_message(client, topic, message):
+            print("Got message: "+message)
+            rfm69.send(bytes(message, "ascii"), destination=int(self.id))
+        return handle_message
+
 
 gw_topic_base = "homeassistant/binary_sensor/rfgw"
 
-gw_pres_dict = {
+gw_presentation_dict = {
     'name': "RFGw",
     'device_class': "running",
     'state_topic': gw_topic_base + "/state",
+    'command_topic': gw_topic_base + "/set",
     'unique_id': "rfgw01",
     'device': {'identifiers': ["rfgw01"], 'name': "rfgw01"},
 }
 
-gw_payload = json.dumps(gw_pres_dict)
+gw_payload = json.dumps(gw_presentation_dict)
 print(gw_payload)
 
 
@@ -43,14 +92,18 @@ pool = socketpool.SocketPool(wifi.radio)
 ssl_context = ssl.create_default_context()
 
 mqtt_client = MQTT.MQTT(
-    broker="192.168.1.147",
+    broker="192.168.1.8",
     port=1883,
     socket_pool=pool,
+    username="rfgw",
+    password="StrNgRF",
     ssl_context=ssl_context,
 )
 
 mqtt_client.connect()
 mqtt_client.publish(gw_topic_base+"/config", gw_payload)
+mqtt_client.publish(gw_topic_base+"/state", "ON")
+mqtt_client.subscribe(gw_topic_base+"/set")
 # Define radio parameters.
 RADIO_FREQ_MHZ = 433.0  # Frequency of the radio in Mhz. Must match your
 # module! Can be a value like 915.0, 433.0, etc.
@@ -61,8 +114,8 @@ RESET = digitalio.DigitalInOut(board.GP15)
 # Or uncomment and instead use these if using a Feather M0 RFM69 board
 # and the appropriate CircuitPython build:
 # CS = digitalio.DigitalInOut(board.RFM69_CS)
-# RESET = digitalio.DigitalInOut(board.RFM69_RST)
-
+# RESET = digitalio.digitalioitalInOut(board.RFM69_RST)
+PING_TIME = -1
 # Define the onboard LED
 LED = digitalio.DigitalInOut(board.LED)
 LED.direction = digitalio.Direction.OUTPUT
@@ -90,8 +143,8 @@ print("Frequency deviation: {0}hz".format(rfm69.frequency_deviation))
 # This is a limitation of the radio packet size, so if you need to send larger
 # amounts of data you will need to break it into smaller send calls.  Each send
 # call will wait for the previous one to finish before continuing.
-rfm69.send(bytes("Hello world!\r\n", "utf-8"))
-print("Sent hello world message!")
+# rfm69.send(bytes("Hello world!\r\n", "utf-8"))
+# print("Sent hello world message!")
 
 # Wait to receive packets.  Note that this library can't receive data at a fast
 # rate, in fact it can only receive and process one 60 byte packet at a time.
@@ -99,6 +152,12 @@ print("Sent hello world message!")
 # and receiving a single message at a time.
 print("Waiting for packets...")
 while True:
+    # send a ping too all
+    now = time.monotonic()
+    if now >= PING_TIME+30:
+        rfm69.send_with_ack("ping")
+        PING_TIME = now
+    mqtt_client.loop()
     packet = rfm69.receive()
     # Optionally change the receive timeout from its default of 0.5 seconds:
     # packet = rfm69.receive(timeout=5.0)
@@ -110,8 +169,12 @@ while True:
     else:
         # Received a packet!
         LED.value = True
-        # Print out the raw bytes of the packet:
-        print("Received (raw bytes): {0}".format(packet))
+        mesg = NodeMsg(packet, mqtt_client, rfm69)
+        mesg.process()
+        # print("Received (raw bytes): {0}".format(packet))
+        # print("Got a presentation packet from id: "+msg.id)
+        # mqtt_client.publish(topic, payload)
+        # print("sent mqtt discovery")
         # And decode to ASCII text and print it too.  Note that you always
         # receive raw bytes and need to convert to a text format like ASCII
         # if you intend to do string processing on your data.  Make sure the
