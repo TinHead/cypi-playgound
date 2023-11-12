@@ -1,3 +1,9 @@
+# SPDX-FileCopyrightText: 2018 Tony DiCola for Adafruit Industries
+# SPDX-License-Identifier: MIT
+
+# Simple example to send a message and then wait indefinitely for messages
+# to be received.  This uses the default RadioHead compatible GFSK_Rb250_Fd250
+# modulation and packet format for the radio.
 import board
 import busio
 import digitalio
@@ -68,7 +74,7 @@ while True:
         GW_UP = False
     if now >= PRES_TIME+20:
         rfm69.send(bytes(presentation, "ascii"))
-        rfm69.send(bytes(str(MY_ID)+";"+MY_NAME+";1;switch;"+MY_STATE, "ascii"))
+        rfm69.send(bytes(state, "ascii"))
         PRES_TIME = time.monotonic()
     packet = rfm69.receive()
     if packet is None:
@@ -95,7 +101,7 @@ while True:
             if not GW_UP:
                 print("resending presentation message!")
                 rfm69.send(bytes(presentation, "ascii"))
-                rfm69.send(bytes(str(MY_ID)+";"+MY_NAME+";1;switch;"+MY_STATE, "ascii"))
+                rfm69.send(bytes(state, "ascii"))
                 GW_UP = True
         # elif packet == "present":
         #     print("Got presentation request!")
