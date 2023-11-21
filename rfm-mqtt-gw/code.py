@@ -8,8 +8,7 @@ from socketpool import SocketPool
 from ssl import create_default_context
 from adafruit_minimqtt import adafruit_minimqtt as MQTT
 from json import dumps
-from time import monotonic
-from asyncio import gather, sleep, sleep_ms, run
+from asyncio import gather, sleep, sleep_ms, run, create_task
 
 # constants
 
@@ -26,11 +25,12 @@ NODES = []
 
 class NodeMsg:
     def __init__(self, msg, client, rfm):
-        self.id = str(msg, "ascii").split(';')[0]  # node id
-        self.name = str(msg, "ascii").split(';')[1]  # 0 - presentation, 1 - state
-        self.type = str(msg, "ascii").split(';')[2]  # payload
-        self.device = str(msg, "ascii").split(';')[3]
-        self.payload = str(msg, "ascii").split(';')[4]
+        fields = str(msg, "ascii").split(';')
+        self.id = fields[0]  # node id
+        self.name = fields[1]  # 0 - presentation, 1 - state
+        self.type = fields[2]  # payload
+        self.device = fields[3]
+        self.payload = fields[4]
         self.client = client
         self.topic_base = "homeassistant/"+self.device+"/"+self.name
         self.topic_state = self.topic_base+"/state"
@@ -54,7 +54,10 @@ class NodeMsg:
                         'device': {'identifiers': [self.id], 'name': self.name}
                         }
                 try:
+                    # setup the node in mqtt
                     self.client.publish(self.topic_base+"/config", dumps(jmsg))
+                    # set the initial state
+                    self.client.publish(self.topic_state, self.payload)
                     self.client.subscribe(self.topic_cmd)
                     self.client.add_topic_callback(self.topic_cmd, self.handle)
                     NODES.append(self.id)
@@ -82,8 +85,12 @@ class NodeMsg:
 
 def init_network():
     print("Connecting to wifi ..")
-    radio.connect(getenv("CIRCUITPY_WIFI_SSID"),
-                  getenv("CIRCUIT_WIFI_PASSWORD"))
+    while not radio.connected:
+        try:
+            radio.connect(getenv("CIRCUITPY_WIFI_SSID"),
+                          getenv("CIRCUIT_WIFI_PASSWORD"))
+        except:
+            continue
     print("Connected with ip", radio.ipv4_address)
     sock_pool = SocketPool(radio)
     ssl_context = create_default_context()
@@ -128,7 +135,8 @@ def init_gw(client):
     gw_payload = dumps(gw_presentation_dict)
 
     client.publish(gw_topic_base+"/config", gw_payload)
-    client.publish(gw_topic_base+"/state", "ON")
+    client.publish(gw_topic_base+"/state", "Running")
+    return gw_topic_base, gw_payload
 
 
 async def send_ping(rfm):
@@ -157,13 +165,24 @@ async def handle_mqtt_loop(mqtt):
         await sleep_ms(1)
 
 
+async def represent(client, topic, payload):
+    while True:
+        client.publish(topic+"/config", payload)
+        client.publish(topic+"/state", "Running")
+        await sleep(60)
+
+
 async def main():
     # connect to wifi
     print("Main ..")
     pool, ssl_con = init_network()
     mqtt_client = init_mqtt(pool, ssl_con)
-    init_gw(mqtt_client)
+    topic, payload = init_gw(mqtt_client)
     rfm69 = init_rfm69(CS, RESET, GP18, GP19, GP16)
-    await gather(send_ping(rfm69), handle_rfm_receive(rfm69, mqtt_client), handle_mqtt_loop(mqtt_client))
+    ping_task = create_task(send_ping(rfm69))
+    rfm_recv_task = create_task(handle_rfm_receive(rfm69, mqtt_client))
+    mqtt_loop_task = create_task(handle_mqtt_loop(mqtt_client))
+    repr_task = create_task(represent(mqtt_client, topic, payload))
+    await gather(ping_task, rfm_recv_task, mqtt_loop_task, repr_task)
 
 run(main())
